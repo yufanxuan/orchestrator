@@ -41,9 +41,13 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 	}
 	defer admission.Close()
 	masterCtx, cancelMaster := context.WithCancel(ctx)
+	// Worker processes outlive the shutdown signal: the graceful path drains
+	// them before this context is cancelled at final teardown.
+	workerLifeCtx, cancelWorkerLife := context.WithCancel(context.Background())
 	var masterGroup sync.WaitGroup
 	defer func() {
 		cancelMaster()
+		cancelWorkerLife()
 		masterGroup.Wait()
 	}()
 	startMasterTask := func(task func()) {
@@ -137,9 +141,10 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 	dial := func(ctx context.Context) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", cfg.ConfigSocket)
 	}
-	startMasterTask(func() {
-		routesync.NewSubscriber(dial, routesync.ProxyPluginID, registration, routeSink, view, logger).Run(masterCtx)
-	})
+	subscriber := &subscriberManager{launch: func(ctx context.Context) {
+		routesync.NewSubscriber(dial, routesync.ProxyPluginID, registration, routeSink, view, logger).Run(ctx)
+	}}
+	subscriber.start()
 
 	var mmdsListener net.Listener
 	mmdsPolicy, ready := view.WaitPolicy(masterCtx)
@@ -156,16 +161,35 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 		defer mmdsListener.Close()
 	}
 
+	var metricsCtl *metricsControl
 	if cfg.MetricsListen != "" {
-		startMasterTask(func() { appnet.ServeMetrics(masterCtx, cfg.MetricsListen, metricSet, logger) })
+		metricsListener, err := net.Listen("tcp", cfg.MetricsListen)
+		if err != nil {
+			return fmt.Errorf("proxy: listen metrics_listen %s: %w", cfg.MetricsListen, err)
+		}
+		metricsCtl = &metricsControl{
+			addr: cfg.MetricsListen, log: logger,
+			serve: func(listener net.Listener) {
+				startMasterTask(func() { appnet.ServeMetricsListener(masterCtx, listener, metricSet, logger) })
+			},
+		}
+		metricsCtl.serve(metricsListener)
+	}
+
+	restartGate := newRestartGate()
+	workerProcesses := newWorkerRegistry()
+	control := &MasterControl{
+		logger: logger, sub: subscriber, gate: restartGate,
+		workers: workerProcesses, metrics: metricsCtl,
 	}
 
 	for index := 0; index < cfg.Workers; index++ {
 		workerIndex := index
 		startMasterTask(func() {
-			superviseWorker(masterCtx, workerIndex, effective, proxyNamespace, dataListener, mmdsListener, view, admission, masterStats, logger)
+			superviseWorker(masterCtx, workerLifeCtx, workerIndex, effective, proxyNamespace, dataListener, mmdsListener, view, admission, masterStats, restartGate, workerProcesses, logger)
 		})
 	}
+	runtime.setMasterControl(control)
 
 	logger.Info("proxy master serving",
 		"workers", cfg.Workers,
@@ -182,19 +206,28 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 		}(),
 	)
 	<-masterCtx.Done()
+	// Standalone graceful exit: phase one freezes the route view and stops
+	// supervision/metrics; phase two drains workers within the configured
+	// bound. A hot-upgrade orchestration that already ran phase one reaches
+	// phase two here on its own SIGTERM.
+	control.GracefulShutdown()
+	control.DrainWorkers(cfg.DrainTimeoutDur())
 	return nil
 }
 
-func superviseWorker(ctx context.Context, index int, effective *EffectiveConfig, proxyNamespace *netns.NetNS, dataListener, mmdsListener net.Listener, view *proxyshm.MasterView, admission *proxyadmission.Master, stats *proxystats.MasterStats, logger *slog.Logger) {
+func superviseWorker(ctx context.Context, life context.Context, index int, effective *EffectiveConfig, proxyNamespace *netns.NetNS, dataListener, mmdsListener net.Listener, view *proxyshm.MasterView, admission *proxyadmission.Master, stats *proxystats.MasterStats, gate *restartGate, workers *workerRegistry, logger *slog.Logger) {
 	workerID := fmt.Sprintf("proxy-%d", index)
 	var epoch uint64
 	for ctx.Err() == nil {
 		epoch++
-		err := runWorkerProcess(ctx, index, workerID, epoch, effective, proxyNamespace, dataListener, mmdsListener, view, admission, stats, logger)
+		err := runWorkerProcess(ctx, life, index, workerID, epoch, effective, proxyNamespace, dataListener, mmdsListener, view, admission, stats, workers, logger)
 		if ctx.Err() != nil {
 			return
 		}
 		logger.Warn("proxy worker exited; restarting", "worker", workerID, "err", err)
+		if !gate.wait(ctx) {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return

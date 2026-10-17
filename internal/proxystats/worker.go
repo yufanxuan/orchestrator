@@ -112,6 +112,29 @@ func (w *WorkerStats) Inc(name string) {
 	w.signal()
 }
 
+// InflightTotal reports the sum of parking and egress counts across every
+// tracked sandbox on this worker. A zero result means every admitted relay has
+// finished; the drain path uses it to decide that the worker may exit.
+func (w *WorkerStats) InflightTotal() int {
+	if w == nil {
+		return 0
+	}
+	total := 0
+	for index := range w.shards {
+		shard := &w.shards[index]
+		shard.mu.Lock()
+		for _, entry := range shard.entries {
+			entry.mu.Lock()
+			for _, state := range entry.services {
+				total += int(state.parking) + int(state.egress)
+			}
+			entry.mu.Unlock()
+		}
+		shard.mu.Unlock()
+	}
+	return total
+}
+
 func (w *WorkerStats) BeginParking(sandboxID string, service proxy.ConnectService) proxy.TrafficFlow {
 	serviceName := string(service)
 	if w == nil || !validSandboxID(sandboxID) || !validService(serviceName) {

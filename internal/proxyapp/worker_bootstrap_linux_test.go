@@ -196,7 +196,7 @@ func TestWorkerBootstrapCloseReleasesUnconsumedDescriptors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	descriptors := make([]int, 7)
+	descriptors := make([]int, 8)
 	for index := range descriptors {
 		descriptors[index], err = unix.Dup(int(file.Fd()))
 		if err != nil {
@@ -205,7 +205,7 @@ func TestWorkerBootstrapCloseReleasesUnconsumedDescriptors(t *testing.T) {
 	}
 	bootstrap := &WorkerBootstrap{fds: workerFDMapping{
 		Data: descriptors[0], MMDS: descriptors[1], Wake: descriptors[2],
-		Notify: descriptors[3], Stats: descriptors[4], MMDSRPC: descriptors[5], Admission: descriptors[6],
+		Notify: descriptors[3], Drain: descriptors[4], Stats: descriptors[5], MMDSRPC: descriptors[6], Admission: descriptors[7],
 	}}
 	if err := bootstrap.Close(); err != nil {
 		t.Fatal(err)
@@ -241,7 +241,7 @@ func validWorkerEnvelope(t *testing.T) workerEnvelope {
 }
 
 func validWorkerFDMapping() workerFDMapping {
-	return workerFDMapping{Data: 100, MMDS: -1, Wake: 101, Notify: 102, Stats: 103, MMDSRPC: 104, Admission: 105}
+	return workerFDMapping{Data: 100, MMDS: -1, Wake: 101, Notify: 102, Drain: 106, Stats: 103, MMDSRPC: 104, Admission: 105}
 }
 
 func marshalWorkerEnvelope(t *testing.T, value workerEnvelope) []byte {

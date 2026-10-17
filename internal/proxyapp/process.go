@@ -18,8 +18,8 @@ import (
 	"github.com/kuasar-sandbox/orchestrator/internal/proxystats"
 )
 
-func runWorkerProcess(ctx context.Context, workerIndex int, workerID string, epoch uint64, effective *EffectiveConfig, proxyNamespace *netns.NetNS, dataListener, mmdsListener net.Listener, view *proxyshm.MasterView, admission *proxyadmission.Master, stats *proxystats.MasterStats, logger *slog.Logger) error {
-	if effective == nil || view == nil || admission == nil || stats == nil || logger == nil {
+func runWorkerProcess(ctx context.Context, life context.Context, workerIndex int, workerID string, epoch uint64, effective *EffectiveConfig, proxyNamespace *netns.NetNS, dataListener, mmdsListener net.Listener, view *proxyshm.MasterView, admission *proxyadmission.Master, stats *proxystats.MasterStats, workers *workerRegistry, logger *slog.Logger) error {
+	if effective == nil || view == nil || admission == nil || stats == nil || workers == nil || logger == nil {
 		return fmt.Errorf("proxy worker process: unresolved startup state")
 	}
 	executable, err := os.Executable()
@@ -46,16 +46,21 @@ func runWorkerProcess(ctx context.Context, workerIndex int, workerID string, epo
 		closeFiles([]*os.File{dataFile, mmdsFile, wakeRead, wakeWrite})
 		return err
 	}
-	statsMaster, statsWorker, err := newSocketPair("proxy-stats")
+	drainRead, drainWrite, err := os.Pipe()
 	if err != nil {
 		closeFiles([]*os.File{dataFile, mmdsFile, wakeRead, wakeWrite, notifyRead, notifyWrite})
+		return err
+	}
+	statsMaster, statsWorker, err := newSocketPair("proxy-stats")
+	if err != nil {
+		closeFiles([]*os.File{dataFile, mmdsFile, wakeRead, wakeWrite, notifyRead, notifyWrite, drainRead, drainWrite})
 		return err
 	}
 	mmdsRPCMaster, mmdsRPCWorker, err := newSocketPair("proxy-mmdsrpc")
 	if err != nil {
 		closeFiles([]*os.File{
 			dataFile, mmdsFile, wakeRead, wakeWrite, notifyRead, notifyWrite,
-			statsMaster, statsWorker,
+			drainRead, drainWrite, statsMaster, statsWorker,
 		})
 		return err
 	}
@@ -63,11 +68,11 @@ func runWorkerProcess(ctx context.Context, workerIndex int, workerID string, epo
 	if err != nil {
 		closeFiles([]*os.File{
 			dataFile, mmdsFile, wakeRead, wakeWrite, notifyRead, notifyWrite,
-			statsMaster, statsWorker, mmdsRPCMaster, mmdsRPCWorker,
+			drainRead, drainWrite, statsMaster, statsWorker, mmdsRPCMaster, mmdsRPCWorker,
 		})
 		return err
 	}
-	parentFiles := []*os.File{wakeRead, notifyWrite, statsMaster, mmdsRPCMaster}
+	parentFiles := []*os.File{wakeRead, notifyWrite, drainWrite, statsMaster, mmdsRPCMaster}
 	defer closeFiles(parentFiles)
 	workerFiles := make([]*os.File, 0, 8)
 	nextDescriptor := 3
@@ -83,6 +88,7 @@ func runWorkerProcess(ctx context.Context, workerIndex int, workerID string, epo
 	fds := workerFDMapping{
 		Data: addWorkerFile(dataFile), MMDS: addWorkerFile(mmdsFile),
 		Wake: addWorkerFile(wakeWrite), Notify: addWorkerFile(notifyRead), Stats: addWorkerFile(statsWorker),
+		Drain:     addWorkerFile(drainRead),
 		MMDSRPC:   addWorkerFile(mmdsRPCWorker),
 		Admission: addWorkerFile(admissionFile),
 	}
@@ -119,8 +125,14 @@ func runWorkerProcess(ctx context.Context, workerIndex int, workerID string, epo
 		}
 	}()
 
-	workerCtx, cancelWorker := context.WithCancel(ctx)
+	// life is independent of the shutdown signal so the graceful drain can
+	// keep this worker serving until DrainWorkers or final teardown ends it.
+	workerCtx, cancelWorker := context.WithCancel(life)
 	defer cancelWorker()
+	handle := &workerHandle{drain: drainWrite, cancel: cancelWorker, done: make(chan struct{})}
+	workers.register(workerIndex, handle)
+	defer workers.remove(workerIndex, handle)
+	defer close(handle.done)
 	command := exec.CommandContext(workerCtx, "/proc/self/exe")
 	// Preserve the established worker process shape for operators and readiness
 	// probes. The sealed bootstrap, rather than these arguments, authorizes the

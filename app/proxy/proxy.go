@@ -60,6 +60,26 @@ type Runtime struct {
 	// this worker epoch. The master process ignores this field. BindRuntime must
 	// construct a fresh instance for every worker invocation.
 	WorkerExtension proxyextension.WorkerExtension
+
+	// linked is set once the master's proxyapp runtime is resolved. It lets a
+	// custom master reach the running master control after serving starts.
+	linked *runtimeLink
+}
+
+type runtimeLink struct {
+	resolved atomic.Pointer[proxyapp.Runtime]
+}
+
+// MasterControl returns the running master's graceful-exit control for
+// hot-upgrade orchestration. It returns nil before the master serves and in
+// worker processes.
+func (r *Runtime) MasterControl() *proxyapp.MasterControl {
+	if r != nil && r.linked != nil {
+		if resolved := r.linked.resolved.Load(); resolved != nil {
+			return resolved.MasterControl()
+		}
+	}
+	return nil
 }
 
 // MarshalJSON rejects accidental process-runtime serialization.
@@ -179,7 +199,7 @@ func (a *App) runMasterProcess(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	runtimeBindings := &Runtime{}
+	runtimeBindings := &Runtime{linked: &runtimeLink{}}
 	process := Process{Role: RoleMaster}
 	if a.hooks.BindRuntime != nil {
 		if err := a.hooks.BindRuntime(ctx, process, runtimeBindings); err != nil {
@@ -190,6 +210,7 @@ func (a *App) runMasterProcess(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	runtimeBindings.linked.resolved.Store(resolved)
 	return a.runMaster(ctx, effective, resolved)
 }
 

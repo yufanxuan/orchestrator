@@ -44,6 +44,7 @@ type workerFDMapping struct {
 	MMDS      int `json:"mmds"`
 	Wake      int `json:"wake"`
 	Notify    int `json:"notify"`
+	Drain     int `json:"drain"`
 	Stats     int `json:"stats"`
 	MMDSRPC   int `json:"mmdsRPC"`
 	Admission int `json:"admission"`
@@ -286,6 +287,7 @@ func validateWorkerFDMapping(fds workerFDMapping, bootstrapFD int) error {
 		{name: "mmds", fd: fds.MMDS, optional: true},
 		{name: "wake", fd: fds.Wake},
 		{name: "notify", fd: fds.Notify},
+		{name: "drain", fd: fds.Drain},
 		{name: "stats", fd: fds.Stats},
 		{name: "mmdsRPC", fd: fds.MMDSRPC},
 		{name: "admission", fd: fds.Admission},

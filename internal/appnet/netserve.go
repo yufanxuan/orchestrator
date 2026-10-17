@@ -48,9 +48,21 @@ func Serve(ctx context.Context, ln net.Listener, handler http.Handler, tlsConfig
 
 // ServeMetrics runs a small /metrics endpoint until ctx is cancelled.
 func ServeMetrics(ctx context.Context, addr string, mx *metrics.M, log *slog.Logger) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Warn("metrics listen", "addr", addr, "err", err)
+		return
+	}
+	ServeMetricsListener(ctx, ln, mx, log)
+}
+
+// ServeMetricsListener serves /metrics on an already-bound listener until ctx
+// is cancelled or the listener is closed. Closing the listener ends serving,
+// which lets callers stop and later re-bind the metrics endpoint.
+func ServeMetricsListener(ctx context.Context, ln net.Listener, mx *metrics.M, log *slog.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", mx.Handler())
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -62,7 +74,7 @@ func ServeMetrics(ctx context.Context, addr string, mx *metrics.M, log *slog.Log
 		case <-done:
 		}
 	}()
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Warn("metrics server", "addr", addr, "err", err)
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		log.Warn("metrics server", "addr", ln.Addr(), "err", err)
 	}
 }

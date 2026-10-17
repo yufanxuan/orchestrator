@@ -195,6 +195,10 @@ func newPreparedWorkerHarness(t *testing.T) *preparedWorkerHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	drainRead, drainWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	statsMaster, statsWorker := net.Pipe()
 	mmdsMaster, mmdsWorker := net.Pipe()
 	dataBase, err := net.Listen("tcp", "127.0.0.1:0")
@@ -211,7 +215,7 @@ func newPreparedWorkerHarness(t *testing.T) *preparedWorkerHarness {
 		process: proxyextension.Process{
 			Role: proxyextension.RoleWorker, WorkerID: "proxy-test", WorkerEpoch: 3,
 		},
-		table: table, wakeFile: wakeWrite, notifyFile: notifyRead,
+		table: table, wakeFile: wakeWrite, notifyFile: notifyRead, drainFile: drainRead,
 		statsConn: statsWorker, mmdsRPCConn: mmdsWorker,
 		data: data,
 	}
@@ -220,6 +224,7 @@ func newPreparedWorkerHarness(t *testing.T) *preparedWorkerHarness {
 		_ = harness.worker.Close()
 		_ = notifyWrite.Close()
 		_ = wakeRead.Close()
+		_ = drainWrite.Close()
 		_ = statsMaster.Close()
 		_ = mmdsMaster.Close()
 	})

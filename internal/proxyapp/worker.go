@@ -36,6 +36,7 @@ type PreparedWorker struct {
 
 	wakeFile    *os.File
 	notifyFile  *os.File
+	drainFile   *os.File
 	statsConn   net.Conn
 	mmdsRPCConn net.Conn
 	data        net.Listener
@@ -93,6 +94,14 @@ func PrepareWorker(bootstrap *WorkerBootstrap) (_ *PreparedWorker, returnErr err
 		return nil, returnErr
 	}
 	delete(owned, fds.Notify)
+	prepared.drainFile, returnErr = inheritedFile(fds.Drain, "proxy-drain")
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	delete(owned, fds.Drain)
+	if prepared.drainFile == nil {
+		return nil, fmt.Errorf("proxy worker: missing drain descriptor")
+	}
 
 	prepared.mmdsRPCConn, returnErr = connectionFromFD(fds.MMDSRPC, "proxy-mmdsrpc")
 	delete(owned, fds.MMDSRPC) // connectionFromFD always consumes the inherited descriptor.
@@ -157,6 +166,8 @@ func (worker *PreparedWorker) Run(ctx context.Context, runtime *Runtime) error {
 		return fmt.Errorf("proxy worker: missing wake descriptor")
 	}
 	defer wakes.Close()
+	drainFile := worker.drainFile
+	worker.drainFile = nil // The drain goroutine owns this inherited descriptor.
 	mmdsConnection := worker.mmdsRPCConn
 	worker.mmdsRPCConn = nil // Client owns the reconstructed connection.
 	mmdsClient := mmdsrpc.NewClient(mmdsConnection)
@@ -217,12 +228,46 @@ func (worker *PreparedWorker) Run(ctx context.Context, runtime *Runtime) error {
 	if worker.mmds != nil {
 		go func() { errorChannel <- mmds.New(view, cfg.ParkTimeoutDur(), logger).Serve(workerCtx, worker.mmds) }()
 	}
+	draining := new(atomic.Bool)
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		buffer := make([]byte, 1)
+		if _, err := drainFile.Read(buffer); err != nil {
+			// The master closed the pipe (it exited or was killed) without a
+			// drain signal; there is nothing to drain.
+			return
+		}
+		draining.Store(true)
+		_ = worker.data.Close()
+		if worker.mmds != nil {
+			_ = worker.mmds.Close()
+		}
+		deadline := time.Now().Add(cfg.DrainTimeoutDur())
+		for time.Now().Before(deadline) {
+			if workerStats.InflightTotal() == 0 {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
 
 	logger.Info("proxy worker serving", "worker", process.WorkerID, "epoch", process.WorkerEpoch)
 	select {
 	case <-ctx.Done():
 		return nil
+	case <-drainDone:
+		if draining.Load() {
+			logger.Info("proxy worker drained; exiting", "worker", process.WorkerID, "epoch", process.WorkerEpoch)
+		}
+		return nil
 	case err := <-errorChannel:
+		if draining.Load() {
+			// Serving ended because the drain path closed the listeners; the
+			// worker stays alive until in-flight relays finish.
+			<-drainDone
+			return nil
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -264,7 +309,7 @@ func (worker *PreparedWorker) Close() error {
 	}
 	worker.closeOnce.Do(func() {
 		worker.closeErr = errors.Join(
-			closeFile(worker.wakeFile), closeFile(worker.notifyFile), closeConn(worker.statsConn),
+			closeFile(worker.wakeFile), closeFile(worker.notifyFile), closeFile(worker.drainFile), closeConn(worker.statsConn),
 			closeConn(worker.mmdsRPCConn), closeListener(worker.data),
 			closeListener(worker.mmds),
 		)
@@ -328,8 +373,8 @@ func connectionFromFD(fd int, name string) (net.Conn, error) {
 }
 
 func workerDescriptors(fds workerFDMapping) map[int]struct{} {
-	result := make(map[int]struct{}, 7)
-	for _, fd := range []int{fds.Data, fds.MMDS, fds.Wake, fds.Notify, fds.Stats, fds.MMDSRPC, fds.Admission} {
+	result := make(map[int]struct{}, 8)
+	for _, fd := range []int{fds.Data, fds.MMDS, fds.Wake, fds.Notify, fds.Drain, fds.Stats, fds.MMDSRPC, fds.Admission} {
 		if fd >= 0 {
 			result[fd] = struct{}{}
 		}

@@ -1315,6 +1315,7 @@ type Proxy struct {
 	TLS           TLSConfig          `yaml:"tls" json:"tls"`                       // data-plane listener cert (= serve's wildcard); "" = h2c
 	Auth          string             `yaml:"auth" json:"auth"`                     // bootstrap fallback until serve pushes policy: off|log|enforce (default enforce)
 	ParkTimeout   string             `yaml:"park_timeout" json:"park_timeout"`     // bootstrap fallback; default 30s
+	DrainTimeout  string             `yaml:"drain_timeout" json:"drain_timeout"`   // graceful drain upper bound on shutdown; default 30m
 	MetricsListen string             `yaml:"metrics_listen" json:"metrics_listen"` // master metrics endpoint; aggregates worker data-plane counters
 	Traffic       ProxyTrafficConfig `yaml:"traffic" json:"traffic"`               // per-Sandbox traffic admission defaults
 }
@@ -1398,6 +1399,9 @@ func (p *Proxy) applyDefaults() {
 	if p.ParkTimeout == "" {
 		p.ParkTimeout = "30s"
 	}
+	if p.DrainTimeout == "" {
+		p.DrainTimeout = "30m"
+	}
 }
 
 // ValidateProxyFinal validates a fully configured independent proxy without
@@ -1431,6 +1435,9 @@ func (p *Proxy) validateDeclarative() error {
 	if _, err := time.ParseDuration(p.ParkTimeout); err != nil {
 		return fmt.Errorf("proxy config: park_timeout %q: %w", p.ParkTimeout, err)
 	}
+	if _, err := time.ParseDuration(p.DrainTimeout); err != nil {
+		return fmt.Errorf("proxy config: drain_timeout %q: %w", p.DrainTimeout, err)
+	}
 	if p.Workers <= 0 {
 		return fmt.Errorf("proxy config: workers must be positive")
 	}
@@ -1456,6 +1463,15 @@ func (p *Proxy) ParkTimeoutDur() time.Duration {
 	d, err := time.ParseDuration(p.ParkTimeout)
 	if err != nil || d <= 0 {
 		return 30 * time.Second
+	}
+	return d
+}
+
+// DrainTimeoutDur parses the graceful drain upper bound (default 30m).
+func (p *Proxy) DrainTimeoutDur() time.Duration {
+	d, err := time.ParseDuration(p.DrainTimeout)
+	if err != nil || d < 0 {
+		return 30 * time.Minute
 	}
 	return d
 }

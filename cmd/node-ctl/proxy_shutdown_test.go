@@ -375,7 +375,7 @@ park_timeout: 100ms
 				b, _ := os.ReadFile(logPath)
 				t.Fatalf("attempt %d: proxy master shutdown: %v\n%s", attempt, masterErr, b)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			_ = cmd.Process.Kill()
 			<-masterExited
 			t.Fatalf("attempt %d: proxy master shutdown timed out", attempt)

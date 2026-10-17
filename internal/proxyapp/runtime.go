@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
 
 	proxyextension "github.com/kuasar-sandbox/orchestrator/app/proxy/extension"
 	publicconfig "github.com/kuasar-sandbox/orchestrator/config"
@@ -37,6 +38,22 @@ type Runtime struct {
 	DataTLS         *tls.Config
 	MasterExtension proxyextension.MasterExtension
 	WorkerExtension proxyextension.WorkerExtension
+
+	masterControl atomic.Pointer[MasterControl]
+}
+
+// MasterControl returns the running master's graceful-exit control for
+// hot-upgrade orchestration. It returns nil before the master serves and in
+// worker processes.
+func (r *Runtime) MasterControl() *MasterControl {
+	if r == nil {
+		return nil
+	}
+	return r.masterControl.Load()
+}
+
+func (r *Runtime) setMasterControl(control *MasterControl) {
+	r.masterControl.Store(control)
 }
 
 // ResolveRuntime applies authoritative provider precedence while keeping TLS
