@@ -90,9 +90,19 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 		defer proxyNamespace.Close()
 	}
 
-	dataListener, err := net.Listen("tcp", cfg.DataListen)
-	if err != nil {
-		return fmt.Errorf("proxy: listen data_listen %s: %w", cfg.DataListen, err)
+	var dataListener net.Listener
+	var hotMMDS net.Listener
+	if HotUpgradeActive() {
+		dataListener, hotMMDS, err = RestoreHotUpgradeListeners()
+		if err != nil {
+			return err
+		}
+		logger.Info("proxy master hot upgrade: data listener restored from inherited descriptor")
+	} else {
+		dataListener, err = net.Listen("tcp", cfg.DataListen)
+		if err != nil {
+			return fmt.Errorf("proxy: listen data_listen %s: %w", cfg.DataListen, err)
+		}
 	}
 	defer dataListener.Close()
 
@@ -154,11 +164,21 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 	mmdsListen := ""
 	if mmdsPolicy != nil && mmdsPolicy.Enabled {
 		mmdsListen = mmdsPolicy.Listen
-		mmdsListener, err = appnet.ListenTCPInNetNS(proxyNamespace, mmdsListen)
-		if err != nil {
-			return fmt.Errorf("proxy: listen conductor MMDS address %s: %w", mmdsListen, err)
+		if hotMMDS != nil {
+			mmdsListener = hotMMDS
+			hotMMDS = nil
+			mmdsListen += " (inherited)"
+			logger.Info("proxy master hot upgrade: mmds listener restored from inherited descriptor")
+		} else {
+			mmdsListener, err = appnet.ListenTCPInNetNS(proxyNamespace, mmdsListen)
+			if err != nil {
+				return fmt.Errorf("proxy: listen conductor MMDS address %s: %w", mmdsListen, err)
+			}
 		}
 		defer mmdsListener.Close()
+	} else if hotMMDS != nil {
+		_ = hotMMDS.Close()
+		hotMMDS = nil
 	}
 
 	var metricsCtl *metricsControl
@@ -190,6 +210,7 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 		})
 	}
 	runtime.setMasterControl(control)
+	control.setListeners(dataListener, mmdsListener)
 
 	logger.Info("proxy master serving",
 		"workers", cfg.Workers,

@@ -2,6 +2,7 @@ package proxyapp
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -195,8 +196,42 @@ type MasterControl struct {
 	workers *workerRegistry
 	metrics *metricsControl
 
+	listenerMu sync.Mutex
+	data       net.Listener
+	mmds       net.Listener
+
 	mu       sync.Mutex
 	phaseOne bool
+}
+
+// setListeners records the master's serving listeners so a hot-upgrade
+// orchestration can capture their descriptors for the forked successor.
+func (c *MasterControl) setListeners(data, mmds net.Listener) {
+	c.listenerMu.Lock()
+	defer c.listenerMu.Unlock()
+	c.data, c.mmds = data, mmds
+}
+
+// CaptureListenerFDs returns duplicated listener files for the data listener
+// and, when MMDS serving is enabled, the MMDS listener. The caller owns the
+// returned files and passes them to the forked successor as extra files
+// together with the hot-upgrade descriptor environment.
+func (c *MasterControl) CaptureListenerFDs() (data, mmds *os.File, err error) {
+	c.listenerMu.Lock()
+	defer c.listenerMu.Unlock()
+	if c.data == nil {
+		return nil, nil, fmt.Errorf("proxy: master listeners are not serving yet")
+	}
+	dataFile, err := listenerFile(c.data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("proxy: capture data listener: %w", err)
+	}
+	mmdsFile, err := listenerFile(c.mmds)
+	if err != nil {
+		_ = dataFile.Close()
+		return nil, nil, fmt.Errorf("proxy: capture mmds listener: %w", err)
+	}
+	return dataFile, mmdsFile, nil
 }
 
 // GracefulShutdown runs phase one: cancel the routesync subscriber (the route

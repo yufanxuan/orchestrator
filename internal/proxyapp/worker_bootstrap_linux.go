@@ -348,6 +348,7 @@ func withoutWorkerEnvironment(environment []string) []string {
 		"KUASAR_PROXY_DATA_FD":     {}, "KUASAR_PROXY_MMDS_FD": {},
 		"KUASAR_PROXY_WAKE_FD": {}, "KUASAR_PROXY_NOTIFY_FD": {}, "KUASAR_PROXY_STATS_FD": {},
 		"KUASAR_PROXY_MMDSRPC_FD": {}, "KUASAR_PROXY_WORKER_ID": {}, "KUASAR_PROXY_WORKER_EPOCH": {},
+		hotUpgradeEnv: {}, hotUpgradeDataFD: {}, hotUpgradeMMDSFD: {},
 	}
 	out := make([]string, 0, len(environment))
 	for _, value := range environment {
