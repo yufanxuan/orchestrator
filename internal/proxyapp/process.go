@@ -166,9 +166,14 @@ func runWorkerProcess(ctx context.Context, life context.Context, workerIndex int
 				err = fmt.Errorf("stats stream ended before worker exit")
 			}
 			result = fmt.Errorf("proxy worker %s stats stream: %w", workerID, err)
+			cancelWorker()
+			<-waitResult
+		} else {
+			// Shutdown path: the stream ends because the worker is exiting and
+			// closing its descriptors; wait for the natural exit instead of
+			// killing the process mid-teardown.
+			result = <-waitResult
 		}
-		cancelWorker()
-		<-waitResult
 	case err := <-waitResult:
 		result = err
 		stats.StreamFault(workerID, epoch)

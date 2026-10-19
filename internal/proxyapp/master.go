@@ -21,6 +21,13 @@ import (
 	"github.com/kuasar-sandbox/orchestrator/internal/types"
 )
 
+// drainWorkersHeadroom extends the master-side drain deadline past the worker
+// drain timeout: a worker's own drain deadline starts when the drain signal
+// arrives, so without headroom a worker that uses its full window is killed by
+// the master just as its own exit path completes. The kill stays a last
+// resort for workers stuck beyond their allowed window.
+const drainWorkersHeadroom = 10 * time.Second
+
 // RunMaster owns routesync, shared state, listeners, metrics, and worker
 // supervision for one frozen EffectiveConfig.
 func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime) error {
@@ -154,6 +161,13 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 	subscriber := &subscriberManager{launch: func(ctx context.Context) {
 		routesync.NewSubscriber(dial, routesync.ProxyPluginID, registration, routeSink, view, logger).Run(ctx)
 	}}
+	// Stop and join the subscriber on every return path before the deferred
+	// table close unmaps memory its unwind path still writes. stop is a no-op
+	// when the graceful path already cancelled it.
+	defer func() {
+		subscriber.stop()
+		subscriber.join()
+	}()
 	subscriber.start()
 
 	var mmdsListener net.Listener
@@ -232,7 +246,7 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 	// bound. A hot-upgrade orchestration that already ran phase one reaches
 	// phase two here on its own SIGTERM.
 	control.GracefulShutdown()
-	control.DrainWorkers(cfg.DrainTimeoutDur())
+	control.DrainWorkers(cfg.DrainTimeoutDur() + drainWorkersHeadroom)
 	return nil
 }
 

@@ -62,40 +62,60 @@ func (g *restartGate) wait(ctx context.Context) bool {
 // subscriberManager owns the routesync subscriber lifecycle so the graceful
 // path can cancel it (freezing the route view) and a rollback can restart it.
 type subscriberManager struct {
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
-	launch func(context.Context)
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	launch  func(context.Context)
+	startMu sync.Mutex // serializes launches so two subscribers never overlap
 }
 
 func (m *subscriberManager) start() {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.done != nil {
-		return
+	done, cancel := m.done, m.cancel
+	m.mu.Unlock()
+	if done != nil {
+		if cancel != nil {
+			return // already running
+		}
+		// A stopped instance must fully unwind before a rollback relaunches;
+		// otherwise two subscribers briefly race for the plugin lease.
+		<-done
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	m.cancel, m.done = cancel, done
+	ctx, cancel2 := context.WithCancel(context.Background())
+	newDone := make(chan struct{})
+	m.mu.Lock()
+	m.cancel, m.done = cancel2, newDone
+	m.mu.Unlock()
 	go func() {
-		defer close(done)
+		defer close(newDone)
 		m.launch(ctx)
 	}()
 }
 
+// stop cancels the running subscriber without waiting. The cancelled session
+// never reconnects, so a registering successor cannot be evicted afterwards.
+// Use join before unmapping state that the unwind path still touches.
 func (m *subscriberManager) stop() {
 	m.mu.Lock()
-	cancel, done := m.cancel, m.done
-	m.cancel, m.done = nil, nil
+	cancel := m.cancel
+	m.cancel = nil
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			// The session unwind stalled. The cancelled subscriber cannot
-			// reconnect, and the master is on its way out; proceed.
-		}
+	}
+}
+
+// join blocks until the current or last cancelled subscriber instance has
+// fully exited. RunMaster's teardown calls it before closing the shared
+// table: the subscriber's unwind path still writes the sync header.
+func (m *subscriberManager) join() {
+	m.mu.Lock()
+	done := m.done
+	m.mu.Unlock()
+	if done != nil {
+		<-done
 	}
 }
 
