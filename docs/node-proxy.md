@@ -104,6 +104,21 @@ Key points:
 - Master exit takes its workers down. After systemd restarts the master, it registers again and rebuilds shared tables.
 - The plugin ID must be exactly `proxy`, and registration must satisfy `subscribe.kind=route_wake`, `proxy!=nil`, and `mmds=true` before the conductor projects MMDS policy, routes, and secret values. Ordinary observers and node-link never receive these confidential values.
 
+### 3.1 systemd readiness and hot-upgrade handover
+
+The master reports readiness with sd_notify `READY=1` once it is serving;
+workers never report. Without `NOTIFY_SOCKET` (manual runs, containers, or
+`Type=simple`/`exec` units) the send is a no-op, so the notification is purely
+opt-in through the unit type. Deployments that hand the unit over to a
+hot-upgrade successor should switch to `Type=notify` with `NotifyAccess=all`,
+`KillMode=process` and `StartLimitIntervalSec=0` (see
+[deploy/node-proxy.service](../deploy/node-proxy.service)), and upgrade the
+binary before the unit: a `Type=notify` unit running a binary that never
+reports READY stalls activation until `TimeoutStartSec`. `KillMode=process`
+makes a systemd stop signal only the master, so workers drain through the
+master's graceful-exit path instead of a broadcast SIGTERM; keep
+`TimeoutStopSec` above `drain_timeout`.
+
 ## 4. routesync and shared route views
 
 routesync remains framed JSON over h2c; the proxy master dials the conductor:

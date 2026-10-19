@@ -4,6 +4,19 @@
 # plugin plane, owns data/MMDS listener sockets, and supervises worker
 # processes. Worker count and shared-memory route table sizing live in
 # /etc/node-ctl/proxy.yaml.
+#
+# The master reports readiness with sd_notify READY=1 once it is serving.
+# The default Type=exec ignores that notification; deployments that hand the
+# unit over to a hot-upgrade successor (sd_notify MAINPID) should switch to
+# the notify trio below and upgrade the binary before the unit: with
+# Type=notify, a binary that never reports READY stalls activation until
+# TimeoutStartSec. KillMode=process also makes systemd stop signal only the
+# master, so workers drain through the master's graceful-exit path instead of
+# receiving a broadcast SIGTERM; keep TimeoutStopSec above drain_timeout.
+#   Type=notify
+#   NotifyAccess=all
+#   KillMode=process
+#   StartLimitIntervalSec=0
 [Unit]
 Description=kuasar node-ctl data-plane proxy
 After=network-online.target node-ctl.service

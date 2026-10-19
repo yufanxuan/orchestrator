@@ -240,6 +240,7 @@ func RunMaster(ctx context.Context, effective *EffectiveConfig, runtime *Runtime
 			return report.MappedBytes
 		}(),
 	)
+	notifySystemdReady(logger)
 	<-masterCtx.Done()
 	// Standalone graceful exit: phase one freezes the route view and stops
 	// supervision/metrics; phase two drains workers within the configured

@@ -135,6 +135,17 @@ client / cluster-router ── data ───► Proxy DataEndpoint
   `subscribe.kind=route_wake`、`proxy!=nil`、`mmds=true`,conductor 才投影 MMDS policy、
   routes 和 secret values;普通 observer 与 node-link 均收不到这些 confidential values。
 
+### 3.1 systemd 就绪通知与热升级交接
+
+master serving 完成后以 sd_notify `READY=1` 上报就绪;worker 不上报。缺少
+`NOTIFY_SOCKET`(手动运行/容器/`Type=simple|exec` unit)时发送为 no-op,通知完全由
+unit 类型 opt-in。需要把 unit 交接给热升级继任者的部署应切换 `Type=notify` +
+`NotifyAccess=all` + `KillMode=process` + `StartLimitIntervalSec=0`(见
+[deploy/node-proxy.service](../deploy/node-proxy.service)),且先升级二进制再切
+unit:`Type=notify` 下不发 READY 的二进制会卡 activation 直到 `TimeoutStartSec`。
+`KillMode=process` 使 systemd stop 只信号 master,worker 经 master 优雅退出路径
+drain 而非广播 SIGTERM;`TimeoutStopSec` 需大于 `drain_timeout`。
+
 ## 4. routesync 与共享路由视图
 
 资源暂停与显式暂停都在既有认证策略通过后 park。节点依据当前 durable intent 判定资格：
