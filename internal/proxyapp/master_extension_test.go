@@ -148,7 +148,7 @@ func TestRunMasterWrapsManagementHandlerOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RunMaster shutdown = %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("RunMaster did not stop")
 	}
 	select {

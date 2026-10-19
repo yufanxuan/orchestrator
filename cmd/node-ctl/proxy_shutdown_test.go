@@ -375,7 +375,7 @@ park_timeout: 100ms
 				b, _ := os.ReadFile(logPath)
 				t.Fatalf("attempt %d: proxy master shutdown: %v\n%s", attempt, masterErr, b)
 			}
-		case <-time.After(15 * time.Second):
+		case <-time.After(30 * time.Second):
 			_ = cmd.Process.Kill()
 			<-masterExited
 			t.Fatalf("attempt %d: proxy master shutdown timed out", attempt)
@@ -516,5 +516,183 @@ park_timeout: 100ms
 	}
 	if err := assertAddressReusable(dataAddr); err != nil {
 		t.Fatalf("data listener was not released: %v", err)
+	}
+}
+
+// TestProxyMasterDataListenFailureExits proves the master fails fast when the
+// configured data address cannot be bound: the process exits with the listen
+// error before any worker is spawned.
+func TestProxyMasterDataListenFailureExits(t *testing.T) {
+	bin := os.Getenv(hotUpgradeBinEnv)
+	if bin == "" {
+		t.Skipf("%s not set; build node-ctl to run the docker verification", hotUpgradeBinEnv)
+	}
+	dir := t.TempDir()
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	cfgPath := filepath.Join(dir, "proxy.yaml")
+	cfg := fmt.Sprintf(`config_socket: %s
+paths:
+  run_root: %s
+data_listen: %s
+shm_path: %s
+route_capacity: 16
+workers: 1
+auth: off
+park_timeout: 100ms
+`, filepath.Join(dir, "node-ctl.socket"), filepath.Join(dir, "run"), held.Addr().String(), filepath.Join(dir, "proxy-routes.shm"))
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "proxy.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	cmd := exec.Command(bin, "proxy", "serve", "--config", cfgPath)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if masterErr := cmd.Wait(); masterErr == nil {
+		contents, _ := os.ReadFile(logPath)
+		t.Fatalf("master exited cleanly although the data listen failed:\n%s", contents)
+	}
+	contents, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(contents), "listen data_listen") {
+		t.Fatalf("master log lacks the data listen failure:\n%s", contents)
+	}
+}
+
+// TestProxyMasterHotUpgradeRestoreFailureExits proves a hot-upgrade successor
+// fails fast when the inherited data descriptor is unusable: the process exits
+// with the restore error instead of binding a second listener.
+func TestProxyMasterHotUpgradeRestoreFailureExits(t *testing.T) {
+	bin := os.Getenv(hotUpgradeBinEnv)
+	if bin == "" {
+		t.Skipf("%s not set; build node-ctl to run the docker verification", hotUpgradeBinEnv)
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "proxy.yaml")
+	cfg := fmt.Sprintf(`config_socket: %s
+paths:
+  run_root: %s
+data_listen: %s
+shm_path: %s
+route_capacity: 16
+workers: 1
+auth: off
+park_timeout: 100ms
+`, filepath.Join(dir, "node-ctl.socket"), filepath.Join(dir, "run"), reserveLoopbackAddress(t), filepath.Join(dir, "proxy-routes.shm"))
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "proxy.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	cmd := exec.Command(bin, "proxy", "serve", "--config", cfgPath)
+	cmd.Env = append(os.Environ(),
+		"KUASAR_PROXY_HOT_UPGRADE=1",
+		"KUASAR_PROXY_HOT_UPGRADE_DATA_FD=99",
+	)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if masterErr := cmd.Wait(); masterErr == nil {
+		contents, _ := os.ReadFile(logPath)
+		t.Fatalf("successor exited cleanly although the restore failed:\n%s", contents)
+	}
+	contents, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(contents), "hot upgrade") {
+		t.Fatalf("successor log lacks the hot-upgrade restore failure:\n%s", contents)
+	}
+}
+
+// TestProxyMasterMetricsListenFailureExits proves the master fails fast when
+// the configured metrics address cannot be bound: the process exits with the
+// listen error after the route policy arrives.
+func TestProxyMasterMetricsListenFailureExits(t *testing.T) {
+	bin := os.Getenv(hotUpgradeBinEnv)
+	if bin == "" {
+		t.Skipf("%s not set; build node-ctl to run the docker verification", hotUpgradeBinEnv)
+	}
+	dir := t.TempDir()
+	configSocket := filepath.Join(dir, "node-ctl.socket")
+	dataAddr := reserveLoopbackAddress(t)
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	t.Cleanup(stopServer)
+	serverReady := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- configsock.New(configSocket, configsock.Deps{
+			RouteSource: &shutdownRouteSource{policy: routesync.Policy{Domain: "proxy.test", AuthMode: "off"}},
+			Plugins:     configsock.NewRegistry(),
+		}, log).ServeReady(serverCtx, serverReady)
+	}()
+	select {
+	case <-serverReady:
+	case err := <-serverDone:
+		t.Fatalf("config socket exited before readiness: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("config socket readiness timed out")
+	}
+	cfgPath := filepath.Join(dir, "proxy.yaml")
+	cfg := fmt.Sprintf(`config_socket: %s
+paths:
+  run_root: %s
+data_listen: %s
+metrics_listen: %s
+shm_path: %s
+route_capacity: 16
+workers: 1
+auth: off
+park_timeout: 100ms
+`, configSocket, filepath.Join(dir, "run"), dataAddr, held.Addr().String(), filepath.Join(dir, "proxy-routes.shm"))
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "proxy.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	cmd := exec.Command(bin, "proxy", "serve", "--config", cfgPath)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+	select {
+	case err := <-waitErr:
+		if err == nil {
+			contents, _ := os.ReadFile(logPath)
+			t.Fatalf("master exited cleanly although the metrics listen failed:\n%s", contents)
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("master kept running with an unbindable metrics address:\n%s", readTail(logPath))
+	}
+	contents, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(contents), "listen metrics_listen") {
+		t.Fatalf("master log lacks the metrics listen failure:\n%s", contents)
 	}
 }

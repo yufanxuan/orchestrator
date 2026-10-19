@@ -1,17 +1,22 @@
 package appnet
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/kuasar-sandbox/orchestrator/internal/metrics"
 )
 
 func TestServePlainHTTPAndGracefulCancellation(t *testing.T) {
@@ -77,6 +82,78 @@ func TestServeTLSUsesCoreALPNPolicy(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("TLS Serve did not stop after cancellation")
+	}
+}
+
+func TestServeMetricsListenerServesUntilListenerCloses(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mx := metrics.New()
+	mx.Inc("proxy_test_metric")
+	done := make(chan struct{})
+	go func() {
+		ServeMetricsListener(context.Background(), listener, mx,
+			slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	response, err := http.Get("http://" + listener.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := make([]byte, 4096)
+	read, _ := response.Body.Read(body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !bytes.Contains(body[:read], []byte("proxy_test_metric")) {
+		t.Fatalf("status=%d body=%q", response.StatusCode, body[:read])
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("metrics serving did not stop after listener close")
+	}
+}
+
+func TestServeMetricsStopsOnCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		ServeMetrics(ctx, "127.0.0.1:0", metrics.New(),
+			slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeMetrics did not stop on cancelled context")
+	}
+}
+
+func TestServeMetricsListenFailureReturns(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	logBuffer := &bytes.Buffer{}
+	done := make(chan struct{})
+	go func() {
+		ServeMetrics(context.Background(), listener.Addr().String(), metrics.New(),
+			slog.New(slog.NewTextHandler(logBuffer, nil)))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeMetrics did not return after listen failure")
+	}
+	if !bytes.Contains(logBuffer.Bytes(), []byte("metrics listen")) {
+		t.Fatalf("listen failure not logged: %q", logBuffer.String())
 	}
 }
 

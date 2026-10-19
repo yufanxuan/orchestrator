@@ -286,6 +286,12 @@ func newProxyStack(t *testing.T, workers int) *proxyStack {
 }
 
 func newProxyStackCfg(t *testing.T, workers int, extra string) *proxyStack {
+	return newProxyStackPolicy(t, workers, extra, routesync.Policy{
+		Domain: "hotup.test", AuthMode: "off", ParkTimeoutMS: 2000,
+	})
+}
+
+func newProxyStackPolicy(t *testing.T, workers int, extra string, policy routesync.Policy) *proxyStack {
 	t.Helper()
 	bin := os.Getenv(hotUpgradeBinEnv)
 	if bin == "" {
@@ -301,7 +307,7 @@ func newProxyStackCfg(t *testing.T, workers int, extra string) *proxyStack {
 	t.Cleanup(stopServer)
 	configSocket := filepath.Join(dir, "node-ctl.socket")
 	source := &staticRouteSource{
-		policy: routesync.Policy{Domain: "hotup.test", AuthMode: "off", ParkTimeoutMS: 2000},
+		policy: policy,
 		route: routesync.RouteEntry{
 			SandboxID:  "sb-hotup",
 			StableID:   "sb-hotup",

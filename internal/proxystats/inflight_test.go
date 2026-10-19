@@ -7,6 +7,10 @@ import (
 )
 
 func TestWorkerStatsInflightTotal(t *testing.T) {
+	var nilStats *WorkerStats
+	if got := nilStats.InflightTotal(); got != 0 {
+		t.Fatalf("nil worker inflight=%d, want 0", got)
+	}
 	stats := NewWorkerStats()
 	if got := stats.InflightTotal(); got != 0 {
 		t.Fatalf("initial inflight=%d, want 0", got)

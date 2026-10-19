@@ -28,3 +28,12 @@ func TestProxyDrainTimeout(t *testing.T) {
 		t.Fatal("invalid drain_timeout accepted")
 	}
 }
+
+func TestProxyDrainTimeoutDurFallbacks(t *testing.T) {
+	for _, raw := range []string{"", "bogus", "-1s"} {
+		proxy := &Proxy{DrainTimeout: raw}
+		if got := proxy.DrainTimeoutDur(); got != 30*time.Minute {
+			t.Fatalf("DrainTimeoutDur(%q)=%v, want 30m fallback", raw, got)
+		}
+	}
+}

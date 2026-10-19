@@ -32,6 +32,26 @@ func TestFreezeRuntimeCarriesRoleExtensionsWithoutSerialization(t *testing.T) {
 	}
 }
 
+func TestRuntimeMasterControlNilBeforeMasterServes(t *testing.T) {
+	var absent *Runtime
+	if absent.MasterControl() != nil {
+		t.Fatal("nil runtime exposed a master control")
+	}
+	unresolved := &Runtime{linked: &runtimeLink{}}
+	if unresolved.MasterControl() != nil {
+		t.Fatal("master control exposed before the runtime resolves")
+	}
+	resolved, err := proxyapp.ResolveRuntime(context.Background(), &publicconfig.Proxy{}, proxyapp.Bindings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked := &Runtime{linked: &runtimeLink{}}
+	linked.linked.resolved.Store(resolved)
+	if linked.MasterControl() != nil {
+		t.Fatal("master control exposed before RunMaster serves")
+	}
+}
+
 func TestMasterConfigureAndBindRuntimeExactlyOnce(t *testing.T) {
 	bootstrap := testComponentBootstrap(t)
 	var configureCalls atomic.Int32

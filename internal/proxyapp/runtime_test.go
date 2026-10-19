@@ -50,6 +50,22 @@ func TestResolveRuntimeTLSProviderKeepsCorePolicy(t *testing.T) {
 	}
 }
 
+func TestRuntimeMasterControlAccessor(t *testing.T) {
+	var absent *Runtime
+	if absent.MasterControl() != nil {
+		t.Fatal("nil runtime exposed a master control")
+	}
+	fresh := &Runtime{}
+	if fresh.MasterControl() != nil {
+		t.Fatal("master control exposed before the master serves")
+	}
+	control := &MasterControl{}
+	fresh.setMasterControl(control)
+	if fresh.MasterControl() != control {
+		t.Fatal("accessor returned a different master control")
+	}
+}
+
 func TestResolveRuntimeCarriesProcessLocalMasterExtension(t *testing.T) {
 	extension := runtimeTestMasterExtension{}
 	runtime, err := ResolveRuntime(context.Background(), testProxyConfig(t), Bindings{MasterExtension: extension})
